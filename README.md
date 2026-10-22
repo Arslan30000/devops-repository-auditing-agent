@@ -4,7 +4,7 @@ I am building a Python agent that audits public GitHub repositories and reports 
 
 ## Progress
 
-I am delivering the project in four committed stages:
+I am delivering the project in four stages:
 
 1. Repository setup and safe inspection tools (this stage).
 2. LLM-directed agent loop and strict JSON report.
@@ -19,7 +19,7 @@ At this stage, `tools.py` implements `list_files`, `read_file`, `search_code`, a
 python -m venv .venv
 # Activate .venv for my shell, then:
 python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
+python -m unittest test_tools -v
 ```
 
-I will keep API credentials in my local `.env` or environment, never in commits. `.env.example` lists the planned variables.
+I will keep API credentials in my local `.env` or environment, never in commits. `.env.example` lists the planned variables. I will move the current root-level tests into `tests/` during final packaging.
