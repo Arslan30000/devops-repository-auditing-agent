@@ -12,8 +12,11 @@ from urllib.parse import urlsplit
 
 MAX_FILE_BYTES = 128_000
 MAX_FILES = 3_000
+MAX_LIST_PAGE = 300
 MAX_MATCHES = 100
+MAX_SEARCH_BYTES = 8_000_000
 MAX_OUTPUT_CHARS = 30_000
+MAX_READ_LINES = 300
 GIT_TIMEOUT = 90
 _SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SENSITIVE_ASSIGNMENT = re.compile(
@@ -21,12 +24,18 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     r"([^\s,;#]+)"
 )
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.DOTALL)
+_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|ASIA[A-Z0-9]{16}|sk-[A-Za-z0-9_-]{20,})\b")
 
 
 def _redact(text: str) -> str:
+    def hide_block(match: re.Match[str]) -> str:
+        return "[REDACTED PRIVATE KEY MATERIAL]" + "\n" * match.group().count("\n")
+
+    text = _PEM_BLOCK.sub(hide_block, text)
     if _PRIVATE_KEY.search(text):
-        return "[REDACTED PRIVATE KEY MATERIAL]"
-    return _SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]", text)
+        text = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY MATERIAL]", text)
+    return _TOKEN.sub("[REDACTED TOKEN]", _SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]", text))
 
 
 class InspectionError(Exception):
@@ -107,19 +116,29 @@ class RepositoryTools:
             raise InspectionError(f"Repository exceeds {MAX_FILES} tracked files")
         return paths
 
-    def list_files(self) -> dict:
-        """List tracked files, with byte sizes, without reading their contents."""
+    def list_files(self, offset: int = 0, limit: int = MAX_LIST_PAGE) -> dict:
+        """Page through tracked file names and sizes without reading contents."""
+        if (type(offset) is not int or offset < 0 or type(limit) is not int or
+                not 1 <= limit <= MAX_LIST_PAGE):
+            raise InspectionError("Invalid file-list page")
         root = self._root()
+        tracked = self._files()
         files = []
-        for name in self._files():
+        for name in tracked[offset:offset + limit]:
             path = root / name
             if path.is_file() and not path.is_symlink():
                 files.append({"path": name, "bytes": path.stat().st_size})
-        return {"files": files, "count": len(files)}
+        next_offset = offset + limit if offset + limit < len(tracked) else None
+        return {"files": files, "count": len(tracked), "next_offset": next_offset}
 
-    def read_file(self, path: str) -> dict:
-        """Read a tracked regular text file with numbered lines."""
+    def read_file(self, path: str, start_line: int = 1, end_line: int | None = None) -> dict:
+        """Read a bounded range of a tracked regular text file with numbered lines."""
         root = self._root()
+        if (type(start_line) is not int or start_line < 1 or
+                (end_line is not None and (type(end_line) is not int or end_line < start_line))):
+            raise InspectionError("Invalid line range")
+        if end_line is not None and end_line - start_line >= MAX_READ_LINES:
+            raise InspectionError(f"Read at most {MAX_READ_LINES} lines at a time")
         if not isinstance(path, str) or path not in self._files():
             raise InspectionError("File is not tracked in this repository")
         candidate = root / path
@@ -130,10 +149,20 @@ class RepositoryTools:
         data = candidate.read_bytes()
         if b"\0" in data:
             raise InspectionError("Binary files cannot be read as text")
-        text = data.decode("utf-8", "replace")
-        numbered = "\n".join(f"{index}: {_redact(line)}" for index, line in enumerate(text.splitlines(), 1))
-        return {"path": path, "content": numbered[:MAX_OUTPUT_CHARS],
-                "truncated": len(numbered) > MAX_OUTPUT_CHARS}
+        lines = _redact(data.decode("utf-8", "replace")).splitlines()
+        last = min(len(lines), end_line or start_line + MAX_READ_LINES - 1)
+        output = []
+        used = 0
+        for index in range(start_line, last + 1):
+            numbered = f"{index}: {lines[index - 1]}"
+            if used + len(numbered) + 1 > MAX_OUTPUT_CHARS:
+                break
+            output.append(numbered)
+            used += len(numbered) + 1
+        actual_end = start_line + len(output) - 1
+        return {"path": path, "content": "\n".join(output), "start_line": start_line,
+                "end_line": actual_end, "total_lines": len(lines),
+                "truncated": actual_end < len(lines)}
 
     def search_code(self, pattern: str) -> dict:
         """Search tracked text files for a literal, case-insensitive string."""
@@ -141,11 +170,16 @@ class RepositoryTools:
             raise InspectionError("Search pattern must contain 1 to 120 characters")
         root = self._root()
         matches = []
+        searched_bytes = 0
         for name in self._files():
             path = root / name
             if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
                 continue
+            if searched_bytes + path.stat().st_size > MAX_SEARCH_BYTES:
+                return {"matches": matches, "truncated": True,
+                        "note": "Search byte budget reached; inspect relevant files directly"}
             data = path.read_bytes()
+            searched_bytes += len(data)
             if b"\0" in data:
                 continue
             for line_number, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
@@ -173,8 +207,8 @@ class RepositoryTools:
 
 
 TOOL_DESCRIPTIONS = {
-    "list_files": "Discover tracked repository paths and sizes. No arguments.",
-    "read_file": "Read a tracked text file with line numbers. Arguments: path.",
+    "list_files": "Page through tracked repository paths and sizes. Optional offset/limit, at most 300 per page.",
+    "read_file": "Read up to 300 numbered lines of a tracked text file. Arguments: path, optional start_line/end_line.",
     "search_code": "Find line locations containing a literal string. Arguments: pattern.",
     "git_log": "Inspect recent commit metadata. No arguments.",
 }

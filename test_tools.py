@@ -36,16 +36,35 @@ class ToolTests(unittest.TestCase):
 
     def test_tools_return_bounded_observations(self):
         self.assertEqual(self.tools.list_files()["count"], 2)
+        page = self.tools.list_files(offset=0, limit=1)
+        self.assertEqual(len(page["files"]), 1)
+        self.assertEqual(page["next_offset"], 1)
+        self.assertEqual(self.tools.list_files(offset=1, limit=1)["next_offset"], None)
         self.assertIn("2: TODO: add CI", self.tools.read_file("README.md")["content"])
         self.assertEqual(self.tools.search_code("password"), {
             "matches": [{"file": "secret.txt", "line": 1}], "truncated": False,
         })
         self.assertIn("password=[REDACTED]", self.tools.read_file("secret.txt")["content"])
 
+    def test_line_ranges_and_private_key_redaction(self):
+        (self.root / "config.txt").write_text(
+            "heading\n-----BEGIN PRIVATE KEY-----\nbase64-secret-material\n"
+            "-----END PRIVATE KEY-----\ntrailer\n", encoding="utf-8")
+        with patch.object(self.tools, "_files", return_value=["config.txt"]):
+            result = self.tools.read_file("config.txt", start_line=2, end_line=5)
+        self.assertEqual((result["start_line"], result["end_line"], result["total_lines"]),
+                         (2, 5, 5))
+        self.assertNotIn("base64-secret-material", result["content"])
+        self.assertIn("5: trailer", result["content"])
+        with self.assertRaises(InspectionError):
+            self.tools.read_file("README.md", start_line=10, end_line=2)
+
     def test_rejects_paths_outside_tracked_files(self):
         for path in ("../outside", ".git/config", "missing"):
             with self.subTest(path=path), self.assertRaises(InspectionError):
                 self.tools.read_file(path)
+        with self.assertRaises(InspectionError):
+            self.tools.list_files(limit=301)
 
     def test_rejects_symlink(self):
         try:

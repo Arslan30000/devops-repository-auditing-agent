@@ -26,9 +26,10 @@ class FakeTools:
         self.observed.append("list_files")
         return {"files": [{"path": "README.md", "bytes": 20}], "count": 1}
 
-    def read_file(self, path):
-        self.observed.append(("read_file", path))
-        return {"path": path, "content": "1: # Example", "truncated": False}
+    def read_file(self, path, start_line=1, end_line=None):
+        self.observed.append(("read_file", path, start_line, end_line))
+        line = start_line
+        return {"path": path, "content": f"{line}: # Example", "truncated": False}
 
 
 class FakeClient:
@@ -52,7 +53,7 @@ class AgentTests(unittest.TestCase):
         ])
         result = run_audit(client, tools, "test-model")
         self.assertEqual(result["violations"], [])
-        self.assertEqual(tools.observed, ["list_files", ("read_file", "README.md")])
+        self.assertEqual(tools.observed, ["list_files", ("read_file", "README.md", 1, None)])
         self.assertEqual(client.requests[0]["tool_choice"], "required")
         self.assertEqual(client.requests[1]["messages"][-1]["tool_call_id"], "call_1")
         self.assertEqual(client.requests[2]["messages"][-1]["tool_call_id"], "call_2")
@@ -79,6 +80,35 @@ class AgentTests(unittest.TestCase):
         report = validate_report({"repository": FakeTools.repository_url,
                                   "violations": [item]}, FakeTools.repository_url)
         self.assertEqual(report["violations"][0]["evidence"], "password=[REDACTED]")
+
+    def test_unread_source_line_prompts_follow_up(self):
+        tools = FakeTools()
+        item = {"rule_id": "CFG-001", "category": "configuration", "severity": "medium",
+                "file": "README.md", "line": 12, "description": "Machine-specific path",
+                "evidence": "A local path is embedded at line 12", "recommendation": "Use a relative path"}
+        proposed = json.dumps({"repository": tools.repository_url, "violations": [item]})
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(content=proposed),
+            response(calls=[tool_call("read_file", {"path": "README.md", "start_line": 12,
+                                                  "end_line": 12}, "call_2")]),
+            response(content=proposed),
+        ])
+        report = run_audit(client, tools, "test-model")
+        self.assertEqual(report["violations"][0]["line"], 12)
+        self.assertEqual(tools.observed[-1], ("read_file", "README.md", 12, 12))
+
+    def test_rejects_invalid_category_and_unread_file(self):
+        item = {"rule_id": "CFG-001", "category": "unknown", "severity": "medium",
+                "file": "config.py", "line": 2, "description": "Local path",
+                "evidence": "Machine path", "recommendation": "Use environment"}
+        with self.assertRaises(AgentError):
+            validate_report({"repository": FakeTools.repository_url, "violations": [item]},
+                            FakeTools.repository_url)
+        item["category"] = "configuration"
+        with self.assertRaises(AgentError):
+            validate_report({"repository": FakeTools.repository_url, "violations": [item]},
+                            FakeTools.repository_url, observed_lines={})
 
 
 if __name__ == "__main__":
