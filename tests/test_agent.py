@@ -127,7 +127,7 @@ class AgentTests(unittest.TestCase):
         client = FakeClient([
             response(calls=[tool_call("list_files", {}, "call_1")]),
             response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
-            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+            response(content="Inspection complete; the evidence is ready for the report."),
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
         ])
         result = run_audit(client, tools, "test-model")
@@ -142,10 +142,26 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(client.requests[-1]["response_format"], {"type": "json_object"})
         self.assertNotIn("tools", client.requests[-1])
         self.assertNotIn("tool_choice", client.requests[-1])
-        instructions = client.requests[-1]["messages"][-1]["content"]
+        final_messages = client.requests[-1]["messages"]
+        self.assertEqual([message["role"] for message in final_messages], ["system", "user"])
+        self.assertTrue(all("tool_calls" not in message and "tool_call_id" not in message
+                            for message in final_messages))
+        payload = json.loads(final_messages[1]["content"])
+        self.assertIn("1: # Example", payload["observations"][1]["result"]["content"])
+        instructions = final_messages[0]["content"]
         self.assertIn(tools.repository_url, instructions)
         self.assertIn('"required": ["repository", "violations"]', instructions)
         self.assertIn('"README.md": [[1, 1]]', instructions)
+
+    def test_valid_model_report_needs_no_extra_final_request(self):
+        tools = FakeTools()
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+        ])
+        self.assertEqual(run_audit(client, tools, "test-model")["violations"], [])
+        self.assertEqual(len(client.requests), 3)
 
     def test_exhausted_report_retries_show_specific_reason(self):
         tools = FakeTools()

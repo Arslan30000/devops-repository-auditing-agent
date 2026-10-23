@@ -64,7 +64,7 @@ source .env
 set +a
 ```
 
-The agent requests tools during investigation and JSON mode in a separate final request, so providers do not need to support both in one request. Provider errors include a redacted reason and HTTP status when available. Free-plan token/request limits can prevent a larger audit from completing.
+The agent requests tools during investigation. A valid model-written report is accepted after local validation. If formatting is needed, a separate JSON-mode request receives the observations as data in a fresh conversation without active tool messages or declarations. Providers do not need to support tools and JSON mode in one request. Provider errors include a redacted reason, HTTP status when available, and the investigation/reporting phase. Free-plan token/request limits can prevent a larger audit from completing.
 
 For a smaller input budget on Groq's free plan, set these optional environment variables (or add them to the ignored `.env` and reload it):
 

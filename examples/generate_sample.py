@@ -41,7 +41,7 @@ class ScriptedClient:
                 "recommendation": "Read the debug setting from an environment variable and default it to False.",
             }]}), []),
         ]
-        # The first report is a draft; a separate request emits JSON without tools.
+        # An extra reply is available if a separate JSON formatting request is needed.
         sequence.append(sequence[-1])
         content, calls = sequence[self.turn]
         self.turn += 1
