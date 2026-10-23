@@ -64,6 +64,20 @@ class ToolTests(unittest.TestCase):
         with self.assertRaises(InspectionError):
             self.tools.read_file("README.md", start_line=10, end_line=2)
 
+    def test_default_read_is_small_and_follow_up_preserves_line_numbers(self):
+        (self.root / "long.txt").write_text("\n".join(f"row {i}" for i in range(1, 121)),
+                                           encoding="utf-8")
+        with patch.object(self.tools, "_files", return_value=["long.txt"]):
+            first = self.tools.read_file("long.txt")
+            following = self.tools.read_file("long.txt", start_line=81, end_line=120)
+        self.assertEqual(first["end_line"], 80)
+        self.assertTrue(first["truncated"])
+        self.assertIn("80: row 80", first["content"])
+        self.assertNotIn("81: row 81", first["content"])
+        self.assertIn("81: row 81", following["content"])
+        self.assertIn("120: row 120", following["content"])
+        self.assertFalse(following["truncated"])
+
     def test_rejects_paths_outside_tracked_files(self):
         for path in ("../outside", ".git/config", "missing"):
             with self.subTest(path=path), self.assertRaises(InspectionError):

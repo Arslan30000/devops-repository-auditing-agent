@@ -76,7 +76,7 @@ TOOL_SCHEMAS = [
             "limit": {"type": "integer", "minimum": 1, "maximum": 300}},
             "required": [], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "read_file",
-        "description": "Read up to 300 numbered lines of a relevant tracked text file; use ranges to follow up in larger files.",
+        "description": "Read numbered text (80 lines by default, at most 300). Follow truncated results with targeted ranges.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"},
                        "start_line": {"type": "integer", "minimum": 1},
                        "end_line": {"type": "integer", "minimum": 1}},
@@ -221,12 +221,49 @@ def _dispatch(tools: RepositoryTools, name: str, arguments: str) -> dict:
         return {"error": "Tool execution failed; no result was observed"}
 
 
-def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
+def _request_size(request: dict) -> int:
+    return len(json.dumps(request, ensure_ascii=False, separators=(",", ":")))
+
+
+def _bounded_request(request: dict, limit: int, keep_latest_tools: bool) -> dict:
+    """Remove whole older exchanges, never orphan a tool result or truncate source lines."""
+    bounded = {**request, "messages": list(request["messages"])}
+    messages = bounded["messages"]
+    while _request_size(bounded) > limit:
+        groups = [i for i, message in enumerate(messages)
+                  if message.get("role") == "assistant" and message.get("tool_calls")]
+        removable = groups[:-1] if keep_latest_tools else groups
+        if removable:
+            start = removable[0]
+            end = start + 1
+            while end < len(messages) and messages[end].get("role") == "tool":
+                end += 1
+            del messages[start:end]
+        else:
+            # Older drafts and repair prompts can also accumulate across retries.
+            drafts = [i for i in range(2, len(messages) - 2)
+                      if messages[i].get("role") == "assistant"
+                      and not messages[i].get("tool_calls")]
+            if not drafts:
+                raise AgentError("The latest observation exceeds the context budget; "
+                                 "increase AUDIT_MAX_CONTEXT_CHARS or inspect smaller file ranges")
+            start = drafts[0]
+            end = start + 1
+            if end < len(messages) - 1 and messages[end].get("role") == "user":
+                end += 1
+            del messages[start:end]
+    return bounded
+
+
+def run_audit(client: Any, tools: RepositoryTools, model: str, *,
+              max_context_chars: int = 20_000, max_completion_tokens: int = 2_048) -> dict:
     """Let the model choose tools, execute calls, and feed observations back."""
     repository = tools.repository_url
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Audit {repository}. Start by discovering its files, then investigate relevant evidence. Return JSON."},
+        {"role": "user", "content": f"Audit {repository}. Start by discovering its files, then investigate relevant evidence. "
+         "Return JSON. Older tool exchanges may be omitted to fit the context budget; "
+         "re-read targeted ranges when evidence needed for a claim is no longer visible."},
     ]
     call_count = 0
     validation_retries = 0
@@ -238,7 +275,8 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
         can_call = call_count < MAX_TOOL_CALLS
         if not can_call:
             reporting = True
-        request: dict[str, Any] = {"model": model, "messages": messages, "timeout": 60}
+        request: dict[str, Any] = {"model": model, "messages": messages, "timeout": 60,
+                                   "max_completion_tokens": max_completion_tokens}
         if reporting:
             # Also covers the tool-budget boundary, where there is no draft turn.
             request["messages"] = messages + [{"role": "user", "content":
@@ -247,12 +285,24 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
         else:
             request["tools"] = TOOL_SCHEMAS
             request["tool_choice"] = "required" if call_count == 0 else "auto"
-        try:
-            response = client.chat.completions.create(**request)
-        except Exception as exc:
-            raise AgentError(_request_error(exc, client)) from exc
+            request["parallel_tool_calls"] = False
+        for size_attempt in range(3):
+            bounded = _bounded_request(request, max_context_chars, keep_latest_tools=not reporting)
+            try:
+                response = client.chat.completions.create(**bounded)
+                break
+            except Exception as exc:
+                if getattr(exc, "status_code", None) == 413 and size_attempt < 2:
+                    smaller = max(8_000, int(min(max_context_chars, _request_size(bounded)) * 0.7))
+                    if smaller < max_context_chars:
+                        max_context_chars = smaller
+                        continue
+                raise AgentError(_request_error(exc, client)) from exc
         if not response.choices:
             raise AgentError("LLM returned no choices")
+        if getattr(response.choices[0], "finish_reason", None) == "length":
+            raise AgentError("Model response reached its output limit; increase "
+                             "AUDIT_MAX_COMPLETION_TOKENS within the provider's token allowance")
         message = response.choices[0].message
         calls = message.tool_calls or []
         if calls:
@@ -273,7 +323,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
                     observed_lines.setdefault(path, set()).update(
                         int(line) for line in re.findall(r"(?m)^(\d+):", result["content"]))
                 messages.append({"role": "tool", "tool_call_id": call.id,
-                                 "content": json.dumps(result, ensure_ascii=False)})
+                                 "content": json.dumps(result, ensure_ascii=False, separators=(",", ":"))})
                 call_count += 1
             continue
         if call_count == 0:

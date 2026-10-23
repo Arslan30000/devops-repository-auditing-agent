@@ -13,6 +13,16 @@ from agent_core import AgentError, run_audit
 from tools import InspectionError, RepositoryTools
 
 
+def _environment_limit(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError as exc:
+        raise AgentError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise AgentError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit a public GitHub repository")
     parser.add_argument("--repo", required=True, help="HTTPS github.com/owner/repository URL")
@@ -24,9 +34,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from openai import OpenAI
 
+        context_limit = _environment_limit("AUDIT_MAX_CONTEXT_CHARS", 20_000, 8_000, 500_000)
+        output_limit = _environment_limit("AUDIT_MAX_COMPLETION_TOKENS", 2_048, 256, 32_768)
         client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], max_retries=2)
         with RepositoryTools(args.repo) as tools:
-            report = run_audit(client, tools, os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"))
+            report = run_audit(client, tools, os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
+                               max_context_chars=context_limit, max_completion_tokens=output_limit)
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         # An incomplete or invalid report never replaces an existing result.

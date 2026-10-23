@@ -66,6 +66,15 @@ set +a
 
 The agent requests tools during investigation and JSON mode in a separate final request, so providers do not need to support both in one request. Provider errors include a redacted reason and HTTP status when available. Free-plan token/request limits can prevent a larger audit from completing.
 
+For a smaller input budget on Groq's free plan, set these optional environment variables (or add them to the ignored `.env` and reload it):
+
+```bash
+export AUDIT_MAX_CONTEXT_CHARS=14000
+export AUDIT_MAX_COMPLETION_TOKENS=2048
+```
+
+The default serialized request budget is 20,000 characters and the response limit is 2,048 tokens. The input budget counts the messages and tool definitions; it is a character bound, not an exact provider token count. Older complete tool exchanges may be omitted to fit the budget, while the latest tool exchange is kept during investigation. The model is told to re-read targeted evidence when needed. HTTP 413 responses trigger up to two retries with a smaller context. File reads default to 80 lines and at most 6,000 output characters; larger files remain available through explicit follow-up ranges. Smaller budgets can reduce inspection coverage, and these settings do not bypass per-minute or daily quotas. Higher-limit accounts can increase the budgets. A response cut off at its output limit fails explicitly rather than being saved as a completed report.
+
 ## Run an audit
 
 ```bash

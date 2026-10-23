@@ -15,8 +15,9 @@ MAX_FILES = 3_000
 MAX_LIST_PAGE = 300
 MAX_MATCHES = 100
 MAX_SEARCH_BYTES = 8_000_000
-MAX_OUTPUT_CHARS = 30_000
+MAX_OUTPUT_CHARS = 6_000
 MAX_READ_LINES = 300
+DEFAULT_READ_LINES = 80
 GIT_TIMEOUT = 90
 _SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SENSITIVE_ASSIGNMENT = re.compile(
@@ -120,7 +121,7 @@ class RepositoryTools:
             raise InspectionError(f"Repository exceeds {MAX_FILES} tracked files")
         return paths
 
-    def list_files(self, offset: int = 0, limit: int = MAX_LIST_PAGE) -> dict:
+    def list_files(self, offset: int = 0, limit: int = 100) -> dict:
         """Page through tracked file names and sizes without reading contents."""
         if (type(offset) is not int or offset < 0 or type(limit) is not int or
                 not 1 <= limit <= MAX_LIST_PAGE):
@@ -154,7 +155,7 @@ class RepositoryTools:
         if b"\0" in data:
             raise InspectionError("Binary files cannot be read as text")
         lines = _redact(data.decode("utf-8", "replace")).splitlines()
-        last = min(len(lines), end_line or start_line + MAX_READ_LINES - 1)
+        last = min(len(lines), end_line or start_line + DEFAULT_READ_LINES - 1)
         output = []
         used = 0
         for index in range(start_line, last + 1):

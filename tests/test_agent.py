@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_core import AgentError, run_audit, validate_report
+from agent_core import AgentError, run_audit, validate_report, _bounded_request, _request_size
 from tools import RepositoryTools
 
 
@@ -44,10 +44,58 @@ class FakeClient:
 
     def create(self, **kwargs):
         self.requests.append(deepcopy(kwargs))
-        return next(self.replies)
+        reply = next(self.replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
 
 class AgentTests(unittest.TestCase):
+    def test_context_compaction_preserves_complete_latest_tool_exchange(self):
+        request = {"model": "test-model", "messages": [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "audit"},
+            {"role": "assistant", "tool_calls": [{"id": "old"}]},
+            {"role": "tool", "tool_call_id": "old", "content": "x" * 4_000},
+            {"role": "assistant", "tool_calls": [{"id": "latest"}]},
+            {"role": "tool", "tool_call_id": "latest", "content": "1: important evidence"},
+        ]}
+        original = deepcopy(request)
+        bounded = _bounded_request(request, 1_000, keep_latest_tools=True)
+        self.assertLessEqual(_request_size(bounded), 1_000)
+        self.assertEqual(bounded["messages"][0:2], request["messages"][0:2])
+        self.assertEqual(bounded["messages"][2:], request["messages"][-2:])
+        self.assertEqual(request, original)
+
+    def test_oversized_latest_observation_fails_without_hiding_evidence(self):
+        request = {"messages": [{"role": "system", "content": "rules"},
+                                {"role": "user", "content": "audit"},
+                                {"role": "assistant", "tool_calls": [{"id": "latest"}]},
+                                {"role": "tool", "tool_call_id": "latest", "content": "x" * 2_000}]}
+        with self.assertRaises(AgentError):
+            _bounded_request(request, 1_000, keep_latest_tools=True)
+
+    def test_413_retries_with_a_smaller_valid_context(self):
+        tools = FakeTools()
+        error = RuntimeError("request too large")
+        error.status_code = 413
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_3")]),
+            error,
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+        ])
+        def large_read(path):
+            return {"path": path, "content": "1: " + "evidence " * 450}
+        with patch.object(tools, "read_file", side_effect=large_read):
+            report = run_audit(client, tools, "test-model")
+        self.assertEqual(report["violations"], [])
+        self.assertLess(_request_size(client.requests[4]), _request_size(client.requests[3]))
+        self.assertEqual(client.requests[4]["max_completion_tokens"], 2_048)
+        self.assertIn("call_3", json.dumps(client.requests[4]["messages"]))
+
     def test_provider_error_preserves_reason_and_redacts_key(self):
         key = "test-provider-key"
         error = RuntimeError("Do not print the raw exception")
