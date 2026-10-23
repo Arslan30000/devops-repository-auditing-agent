@@ -94,6 +94,24 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(client.requests[-1]["response_format"], {"type": "json_object"})
         self.assertNotIn("tools", client.requests[-1])
         self.assertNotIn("tool_choice", client.requests[-1])
+        instructions = client.requests[-1]["messages"][-1]["content"]
+        self.assertIn(tools.repository_url, instructions)
+        self.assertIn('"required": ["repository", "violations"]', instructions)
+        self.assertIn('"README.md": [[1, 1]]', instructions)
+
+    def test_exhausted_report_retries_show_specific_reason(self):
+        tools = FakeTools()
+        wrong = response(content='{"repository":"wrong","violations":[]}')
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            wrong, wrong, wrong, wrong, wrong, wrong,
+        ])
+        with self.assertRaises(AgentError) as raised:
+            run_audit(client, tools, "test-model")
+        self.assertIn("after 3 attempts", str(raised.exception))
+        self.assertIn("Report repository or violations array is invalid", str(raised.exception))
+        self.assertIn("tool calls: 2; files read: 1", str(raised.exception))
 
     def test_invalid_report_is_retried_not_written_as_success(self):
         tools = FakeTools()

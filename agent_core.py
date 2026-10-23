@@ -16,6 +16,25 @@ SEVERITIES = {"critical", "high", "medium", "low"}
 CATEGORIES = {"repository_hygiene", "dependency_management", "code_quality", "testing",
               "ci", "security", "configuration", "collaboration", "build_release"}
 FIELDS = {"rule_id", "category", "severity", "file", "line", "description", "evidence", "recommendation"}
+REPORT_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["repository", "violations"],
+    "properties": {
+        "repository": {"type": "string"},
+        "violations": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": sorted(FIELDS),
+            "properties": {
+                **{field: {"type": "string", "minLength": 1} for field in
+                   ("rule_id", "description", "evidence", "recommendation")},
+                "category": {"type": "string", "enum": sorted(CATEGORIES)},
+                "severity": {"type": "string", "enum": sorted(SEVERITIES)},
+                "file": {"type": ["string", "null"]},
+                "line": {"type": ["integer", "null"], "minimum": 1},
+            },
+        }},
+    },
+}
 
 SYSTEM_PROMPT = """You are an evidence-based DevOps repository auditing agent.
 Investigate software engineering and DevOps only. Use tools to observe the repository,
@@ -66,6 +85,37 @@ class AgentError(Exception):
     """The agent cannot produce a trustworthy completed inspection."""
 
 
+def _safe_detail(message: str, client: Any) -> str:
+    key = getattr(client, "api_key", None)
+    if isinstance(key, str) and key:
+        message = message.replace(key, "[REDACTED API KEY]")
+    return " ".join(_redact(message).split())[:600]
+
+
+def _report_instructions(repository: str, observed_lines: dict[str, set[int]]) -> str:
+    """Give the model exact schema and available citations, not an example finding."""
+    citations = {}
+    for path, lines in observed_lines.items():
+        ranges: list[list[int]] = []
+        for line in sorted(lines):
+            if ranges and line == ranges[-1][1] + 1:
+                ranges[-1][1] = line
+            else:
+                ranges.append([line, line])
+        citations[path] = ranges
+    return (
+        "Return the final JSON report with exactly the schema below and no Markdown. "
+        f"The repository field must be exactly {json.dumps(repository)}. "
+        "Use only the listed category and severity values and include every required field. "
+        "Use JSON null, not the string 'null', for inapplicable file/line values. "
+        "Report only supported findings; an empty violations array is valid. "
+        "A file citation must have been read; a line citation must be within an observed "
+        "inclusive line range. If evidence is missing, investigate before reporting it. "
+        "Schema: " + json.dumps(REPORT_SCHEMA) +
+        " Observed file/line ranges: " + json.dumps(citations)
+    )
+
+
 def _request_error(exc: Exception, client: Any) -> str:
     """Expose useful provider diagnostics without dumping responses or credentials."""
     status = getattr(exc, "status_code", None)
@@ -75,10 +125,7 @@ def _request_error(exc: Exception, client: Any) -> str:
     message = body.get("message") if isinstance(body, dict) else None
     detail = ""
     if isinstance(message, str):
-        key = getattr(client, "api_key", None)
-        if isinstance(key, str) and key:
-            message = message.replace(key, "[REDACTED API KEY]")
-        detail = " ".join(_redact(message).split())[:600]
+        detail = _safe_detail(message, client)
     prefix = "LLM request failed"
     if type(status) is int:
         prefix += f" (HTTP {status})"
@@ -181,6 +228,9 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
             reporting = True
         request: dict[str, Any] = {"model": model, "messages": messages, "timeout": 60}
         if reporting:
+            # Also covers the tool-budget boundary, where there is no draft turn.
+            request["messages"] = messages + [{"role": "user", "content":
+                                             _report_instructions(repository, observed_lines)}]
             request["response_format"] = {"type": "json_object"}
         else:
             request["tools"] = TOOL_SCHEMAS
@@ -232,7 +282,9 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
         except (ValueError, AgentError) as exc:
             validation_retries += 1
             if validation_retries > 2:
-                raise AgentError("LLM did not produce a valid report") from exc
+                reason = _safe_detail(str(exc), client)
+                raise AgentError(f"LLM did not produce a valid report after 3 attempts: {reason} "
+                                 f"(tool calls: {call_count}; files read: {len(observed_lines)})") from exc
             messages.append({"role": "assistant", "content": message.content or ""})
             messages.append({"role": "user", "content": f"Correct the JSON report schema: {exc}. Investigate further if needed."})
             reporting = False
