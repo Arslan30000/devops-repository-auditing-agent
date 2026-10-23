@@ -60,7 +60,7 @@ def main() -> None:
         tools.root = root
         with patch.object(tools, "_files", return_value=["README.md", "settings.py"]):
             report = run_audit(ScriptedClient(repository), tools, "offline-scripted-model")
-    destination = Path(__file__).resolve().parents[1] / "sample_report.json"
+    destination = Path(__file__).resolve().parent / "offline_sample_report.json"
     destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {destination}")
 

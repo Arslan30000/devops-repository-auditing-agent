@@ -17,8 +17,10 @@ Clone this project, then open a terminal in its root directory:
 ```bash
 git clone https://github.com/Arslan30000/devops-repository-auditing-agent.git
 cd devops-repository-auditing-agent
-python -m venv .venv
+python3 -m venv .venv
 ```
+
+On Windows, use `python -m venv .venv` for the last command if `python3` is unavailable.
 
 Activate the virtual environment and install the dependency:
 
@@ -48,12 +50,12 @@ $env:OPENAI_MODEL = "gpt-4.1-mini"  # optional
 
 For Windows Command Prompt, use `set OPENAI_API_KEY=your-api-key` and, optionally, `set OPENAI_MODEL=gpt-4.1-mini`. If PowerShell blocks activation, use `.venv\Scripts\python.exe` in place of `python` without activating the environment.
 
-For GroqCloud, use the Groq key as `OPENAI_API_KEY`, set `OPENAI_BASE_URL=https://api.groq.com/openai/v1`, and set `OPENAI_MODEL=openai/gpt-oss-120b` or another available compatible model. In bash, these can be saved in a local, ignored `.env` file:
+For GroqCloud, use the Groq key as `OPENAI_API_KEY`, set `OPENAI_BASE_URL=https://api.groq.com/openai/v1`, and set `OPENAI_MODEL=openai/gpt-oss-20b` or another available compatible model. The 20B model was used for the successful live sample below. In bash, these can be saved in a local, ignored `.env` file:
 
 ```dotenv
 OPENAI_API_KEY="your-groq-api-key"
 OPENAI_BASE_URL="https://api.groq.com/openai/v1"
-OPENAI_MODEL="openai/gpt-oss-120b"
+OPENAI_MODEL="openai/gpt-oss-20b"
 ```
 
 Load that file in each new bash terminal before running:
@@ -89,7 +91,7 @@ Open `report.json` with a text editor or parse it with Python:
 python -m json.tool report.json
 ```
 
-The top-level object contains `repository` and `violations`. Each violation includes `rule_id`, `category`, `severity`, `file`, `line`, `description`, `evidence`, and `recommendation`. Severity is `critical`, `high`, `medium`, or `low`. An empty `violations` array means no supported finding was reported; it is not a guarantee that the repository has no defects. `file` and `line` are JSON `null` when not applicable. See `sample_report.json` for the exact shape.
+The top-level object contains `repository` and `violations`. Each violation includes `rule_id`, `category`, `severity`, `file`, `line`, `description`, `evidence`, and `recommendation`. Severity is `critical`, `high`, `medium`, or `low`. An empty `violations` array means no supported finding was reported; it is not a guarantee that the repository has no defects. `file` and `line` are JSON `null` when not applicable. See `sample_report.json` for the live result and `examples/offline_sample_report.json` for an example containing a finding.
 
 ## How the agent works
 
@@ -110,13 +112,19 @@ python -m unittest discover -s tests -v
 
 The tests cover URL and path restrictions, bounded tool observations, redaction, model-directed follow-up calls, rejection and retry of invalid reports, and a fixture-based agent run using the real file-reading and search methods. A symlink test is skipped only on a filesystem that cannot create symlinks.
 
-Regenerate the example report without an API key:
+The checked-in `sample_report.json` contains authentic output from a live CLI audit of `https://github.com/pypa/sampleproject` using GroqCloud's `openai/gpt-oss-20b`. That run reported no supported violations. This verifies a completed live run and valid JSON output; it does not establish that the repository has no defects or measure recall on injected defects. Model results and the target's default branch can change between runs. To produce a fresh live report:
+
+```bash
+python agent.py --repo https://github.com/pypa/sampleproject --output reports/sampleproject.json
+```
+
+Generate a separate deterministic offline example without an API key:
 
 ```bash
 python examples/generate_sample.py
 ```
 
-`sample_report.json` is output from the actual agent/report-validation code path over a small local fixture using a deterministic scripted model and tracked-file inventory. The example URL is illustrative; this offline demonstration is not a live audit of `github.com/example/demo`. A real audit requires the API key and public repository URL shown above.
+This writes `examples/offline_sample_report.json` through the actual agent/report-validation code path over a local fixture with a scripted model and tracked-file inventory. Its `github.com/example/demo` URL is illustrative. Running the offline example preserves the authentic live `sample_report.json`.
 
 ## Safety and limits
 
