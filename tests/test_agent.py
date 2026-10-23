@@ -80,6 +80,7 @@ class AgentTests(unittest.TestCase):
             response(calls=[tool_call("list_files", {}, "call_1")]),
             response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
         ])
         result = run_audit(client, tools, "test-model")
         self.assertEqual(result["violations"], [])
@@ -87,17 +88,38 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(client.requests[0]["tool_choice"], "required")
         self.assertEqual(client.requests[1]["messages"][-1]["tool_call_id"], "call_1")
         self.assertEqual(client.requests[2]["messages"][-1]["tool_call_id"], "call_2")
+        for request in client.requests[:-1]:
+            self.assertIn("tools", request)
+            self.assertNotIn("response_format", request)
+        self.assertEqual(client.requests[-1]["response_format"], {"type": "json_object"})
+        self.assertNotIn("tools", client.requests[-1])
+        self.assertNotIn("tool_choice", client.requests[-1])
 
     def test_invalid_report_is_retried_not_written_as_success(self):
         tools = FakeTools()
         client = FakeClient([
             response(calls=[tool_call("list_files", {}, "call_1")]),
-            response(content='{"repository":"wrong","violations":[]}'),
             response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(content='{"repository":"wrong","violations":[]}'),
+            response(content='{"repository":"wrong","violations":[]}'),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
         ])
         self.assertEqual(run_audit(client, tools, "test-model")["violations"], [])
-        self.assertIn("Correct the JSON report schema", client.requests[2]["messages"][-1]["content"])
+        self.assertIn("Correct the JSON report schema", client.requests[4]["messages"][-1]["content"])
+
+    def test_tool_budget_exhaustion_requests_json_without_tools(self):
+        tools = FakeTools()
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+        ])
+        with patch("agent_core.MAX_TOOL_CALLS", 2):
+            self.assertEqual(run_audit(client, tools, "test-model")["violations"], [])
+        self.assertEqual(client.requests[-1]["response_format"], {"type": "json_object"})
+        self.assertNotIn("tools", client.requests[-1])
+        self.assertNotIn("tool_choice", client.requests[-1])
 
     def test_rejects_malformed_violation(self):
         with self.assertRaises(AgentError):
@@ -121,8 +143,10 @@ class AgentTests(unittest.TestCase):
         client = FakeClient([
             response(calls=[tool_call("list_files", {}, "call_1")]),
             response(content=proposed),
+            response(content=proposed),
             response(calls=[tool_call("read_file", {"path": "README.md", "start_line": 12,
                                                   "end_line": 12}, "call_2")]),
+            response(content=proposed),
             response(content=proposed),
         ])
         report = run_audit(client, tools, "test-model")
@@ -154,11 +178,13 @@ class AgentTests(unittest.TestCase):
         client = FakeClient([
             response(calls=[tool_call("list_files", {}, "call_1")]),
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
             response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
         ])
         self.assertEqual(run_audit(client, tools, "test-model")["violations"], [])
-        self.assertIn("Inspect repository", client.requests[2]["messages"][-1]["content"])
+        self.assertIn("Inspect repository", client.requests[3]["messages"][-1]["content"])
 
     def test_real_tools_follow_up_and_report_evidence(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -180,12 +206,14 @@ class AgentTests(unittest.TestCase):
                 response(calls=[tool_call("read_file", {"path": "settings.py"}, "call_3")]),
                 response(content=json.dumps({"repository": tools.repository_url,
                                              "violations": [finding]})),
+                response(content=json.dumps({"repository": tools.repository_url,
+                                             "violations": [finding]})),
             ])
             with patch.object(tools, "_files", return_value=["README.md", "settings.py"]):
                 report = run_audit(client, tools, "test-model")
             self.assertEqual(report["violations"], [finding])
             observations = [json.loads(request["messages"][-1]["content"])
-                            for request in client.requests[1:]]
+                            for request in client.requests[1:4]]
             self.assertEqual(observations[1]["matches"], [{"file": "settings.py", "line": 1}])
             self.assertIn("1: DEBUG = True", observations[2]["content"])
 

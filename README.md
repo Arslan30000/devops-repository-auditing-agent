@@ -5,8 +5,8 @@ A Python agent that audits public GitHub repositories for evidence-backed softwa
 ## Requirements
 
 - Python 3.10 or newer and Git on `PATH`.
-- Network access to GitHub and the configured OpenAI API endpoint.
-- An OpenAI API key with access to a model that supports Chat Completions, function tools, and JSON mode. The default model is `gpt-4.1-mini`; set `OPENAI_MODEL` to another compatible model if necessary. API usage may incur charges.
+- Network access to GitHub and the configured LLM API endpoint.
+- An API key for OpenAI or an OpenAI-compatible provider, with access to a model that supports Chat Completions, function tools, and JSON mode. The default model is `gpt-4.1-mini`; set `OPENAI_MODEL` to another compatible model if necessary. API usage may incur charges or be subject to free-plan limits.
 
 The target must be a public repository with a URL in the form `https://github.com/owner/repository`. Private repositories, local directories, and other Git hosts are outside the CLI's scope.
 
@@ -47,6 +47,24 @@ $env:OPENAI_MODEL = "gpt-4.1-mini"  # optional
 ```
 
 For Windows Command Prompt, use `set OPENAI_API_KEY=your-api-key` and, optionally, `set OPENAI_MODEL=gpt-4.1-mini`. If PowerShell blocks activation, use `.venv\Scripts\python.exe` in place of `python` without activating the environment.
+
+For GroqCloud, use the Groq key as `OPENAI_API_KEY`, set `OPENAI_BASE_URL=https://api.groq.com/openai/v1`, and set `OPENAI_MODEL=openai/gpt-oss-120b` or another available compatible model. In bash, these can be saved in a local, ignored `.env` file:
+
+```dotenv
+OPENAI_API_KEY="your-groq-api-key"
+OPENAI_BASE_URL="https://api.groq.com/openai/v1"
+OPENAI_MODEL="openai/gpt-oss-120b"
+```
+
+Load that file in each new bash terminal before running:
+
+```bash
+set -a
+source .env
+set +a
+```
+
+The agent requests tools during investigation and JSON mode in a separate final request, so providers do not need to support both in one request. Provider errors include a redacted reason and HTTP status when available. Free-plan token/request limits can prevent a larger audit from completing.
 
 ## Run an audit
 

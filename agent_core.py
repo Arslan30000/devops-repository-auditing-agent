@@ -173,15 +173,20 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
     validation_retries = 0
     discovered = False
     inspected = False
+    reporting = False
     observed_lines: dict[str, set[int]] = {}
     for _turn in range(MAX_MODEL_TURNS):
         can_call = call_count < MAX_TOOL_CALLS
+        if not can_call:
+            reporting = True
+        request: dict[str, Any] = {"model": model, "messages": messages, "timeout": 60}
+        if reporting:
+            request["response_format"] = {"type": "json_object"}
+        else:
+            request["tools"] = TOOL_SCHEMAS
+            request["tool_choice"] = "required" if call_count == 0 else "auto"
         try:
-            response = client.chat.completions.create(
-                model=model, messages=messages, tools=TOOL_SCHEMAS,
-                tool_choice=("required" if call_count == 0 else "auto") if can_call else "none",
-                response_format={"type": "json_object"}, timeout=60,
-            )
+            response = client.chat.completions.create(**request)
         except Exception as exc:
             raise AgentError(_request_error(exc, client)) from exc
         if not response.choices:
@@ -189,7 +194,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
         message = response.choices[0].message
         calls = message.tool_calls or []
         if calls:
-            if not can_call or len(calls) > MAX_TOOL_CALLS - call_count:
+            if reporting or not can_call or len(calls) > MAX_TOOL_CALLS - call_count:
                 raise AgentError("Tool call limit exceeded")
             messages.append({"role": "assistant", "content": message.content,
                              "tool_calls": [{"id": c.id, "type": "function",
@@ -211,6 +216,15 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
             continue
         if call_count == 0:
             raise AgentError("The model did not inspect the repository")
+        if not reporting:
+            # Providers such as Groq reject JSON mode together with tool definitions.
+            # Preserve the observations, then request the final JSON without tools.
+            messages.append({"role": "assistant", "content": message.content or ""})
+            messages.append({"role": "user", "content":
+                             "Using the observed evidence, return the final JSON report now. "
+                             "Include exactly repository and violations and no Markdown."})
+            reporting = True
+            continue
         try:
             return validate_report(json.loads(message.content or ""), repository,
                                    observed_lines=observed_lines, discovered=discovered,
@@ -221,4 +235,5 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
                 raise AgentError("LLM did not produce a valid report") from exc
             messages.append({"role": "assistant", "content": message.content or ""})
             messages.append({"role": "user", "content": f"Correct the JSON report schema: {exc}. Investigate further if needed."})
+            reporting = False
     raise AgentError("Agent turn limit exceeded without a valid report")
