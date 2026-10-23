@@ -68,6 +68,8 @@ set +a
 
 The agent requests tools during investigation. A valid model-written report is accepted after local validation. If formatting is needed, a separate JSON-mode request receives the observations as data in a fresh conversation without active tool messages or declarations. Providers do not need to support tools and JSON mode in one request. Provider errors include a redacted reason, HTTP status when available, and the investigation/reporting phase. Free-plan token/request limits can prevent a larger audit from completing.
 
+Provider generation errors that indicate an unparseable tool call during investigation are retried at most twice with a reminder to make one native call using valid schema-matching JSON. The rejected generation is never executed or copied into the conversation. Other HTTP 400 configuration errors fail immediately, and repeated parsing failures still exit nonzero.
+
 For a smaller input budget on Groq's free plan, set these optional environment variables (or add them to the ignored `.env` and reload it):
 
 ```bash

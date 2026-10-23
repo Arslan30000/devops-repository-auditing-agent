@@ -51,6 +51,46 @@ class FakeClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_provider_tool_parse_failure_is_retried_before_execution(self):
+        error = RuntimeError("Do not print raw generation")
+        error.status_code = 400
+        error.body = {"error": {"code": "tool_use_failed", "message": "Parsing failed.",
+                                "failed_generation": "private unparsed content"}}
+        tools = FakeTools()
+        client = FakeClient([
+            error,
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+        ])
+        self.assertEqual(run_audit(client, tools, "test-model")["violations"], [])
+        self.assertEqual(tools.observed, ["list_files", ("read_file", "README.md", 1, None)])
+        retry = client.requests[1]
+        self.assertEqual(retry["tool_choice"], "required")
+        self.assertIn("exactly one native function call", retry["messages"][-1]["content"])
+        self.assertNotIn("private unparsed content", json.dumps(client.requests))
+
+    def test_unparseable_generations_stop_after_three_attempts(self):
+        error = RuntimeError("provider parsing error")
+        error.status_code = 400
+        error.body = {"message": "Parsing failed. The model generated output that could not be parsed."}
+        tools = FakeTools()
+        client = FakeClient([error, error, error])
+        with self.assertRaises(AgentError) as raised:
+            run_audit(client, tools, "test-model")
+        self.assertIn("generation attempts: 3", str(raised.exception))
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(tools.observed, [])
+
+    def test_invalid_request_400_is_not_retried(self):
+        error = RuntimeError("invalid request")
+        error.status_code = 400
+        error.body = {"message": "Unsupported parameter response_format"}
+        client = FakeClient([error])
+        with self.assertRaises(AgentError):
+            run_audit(client, FakeTools(), "test-model")
+        self.assertEqual(len(client.requests), 1)
+
     def test_context_compaction_preserves_complete_latest_tool_exchange(self):
         request = {"model": "test-model", "messages": [
             {"role": "system", "content": "rules"},

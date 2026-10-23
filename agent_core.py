@@ -153,6 +153,20 @@ def _request_error(exc: Exception, client: Any) -> str:
     return f"{prefix}: {detail}. {hint}" if detail else f"{prefix}. {hint}"
 
 
+def _recoverable_tool_parse_error(exc: Exception) -> bool:
+    """Recognize provider generation errors, not arbitrary HTTP 400 requests."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    if not isinstance(body, dict):
+        return False
+    return (body.get("code") == "tool_use_failed" or
+            str(body.get("message", "")).startswith(
+                "Parsing failed. The model generated output that could not be parsed"))
+
+
 def validate_report(raw: Any, repository: str,
                     observed_lines: dict[str, set[int]] | None = None,
                     discovered: bool = True,
@@ -318,7 +332,9 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
             request["tools"] = TOOL_SCHEMAS
             request["tool_choice"] = "required" if call_count == 0 else "auto"
             request["parallel_tool_calls"] = False
-        for size_attempt in range(3):
+        size_attempt = 0
+        parse_attempt = 0
+        while True:
             bounded = _bounded_request(request, max_context_chars, keep_latest_tools=not reporting)
             if reporting:
                 bounded = _final_report_request(bounded)
@@ -330,9 +346,20 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
                     smaller = max(8_000, int(min(max_context_chars, _request_size(bounded)) * 0.7))
                     if smaller < max_context_chars:
                         max_context_chars = smaller
+                        size_attempt += 1
                         continue
+                if not reporting and _recoverable_tool_parse_error(exc) and parse_attempt < 2:
+                    parse_attempt += 1
+                    request["messages"] = messages + [{"role": "user", "content":
+                        "The provider could not parse the previous generation. Make exactly one "
+                        "native function call using one of the declared tools. Use valid JSON "
+                        "arguments matching its schema, with no Markdown, XML, or textual "
+                        "function-call imitation. Choose a small, relevant inspection step."}]
+                    request["tool_choice"] = "required"
+                    continue
                 phase = "reporting" if reporting else "investigation"
-                raise AgentError(f"{_request_error(exc, client)} [phase: {phase}]") from exc
+                attempts = f"; generation attempts: {parse_attempt + 1}" if parse_attempt else ""
+                raise AgentError(f"{_request_error(exc, client)} [phase: {phase}{attempts}]") from exc
         if not response.choices:
             raise AgentError("LLM returned no choices")
         if getattr(response.choices[0], "finish_reason", None) == "length":
