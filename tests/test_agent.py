@@ -1,9 +1,13 @@
 import json
+import tempfile
 import unittest
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent_core import AgentError, run_audit, validate_report
+from tools import RepositoryTools
 
 
 def response(content=None, calls=None):
@@ -63,6 +67,7 @@ class AgentTests(unittest.TestCase):
         client = FakeClient([
             response(calls=[tool_call("list_files", {}, "call_1")]),
             response(content='{"repository":"wrong","violations":[]}'),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
         ])
         self.assertEqual(run_audit(client, tools, "test-model")["violations"], [])
@@ -109,6 +114,54 @@ class AgentTests(unittest.TestCase):
         with self.assertRaises(AgentError):
             validate_report({"repository": FakeTools.repository_url, "violations": [item]},
                             FakeTools.repository_url, observed_lines={})
+
+    def test_rejects_unhashable_model_values_cleanly(self):
+        item = {"rule_id": "CFG-001", "category": ["configuration"], "severity": ["low"],
+                "file": None, "line": None, "description": "Bad value", "evidence": "Bad value",
+                "recommendation": "Fix it"}
+        with self.assertRaises(AgentError):
+            validate_report({"repository": FakeTools.repository_url, "violations": [item]},
+                            FakeTools.repository_url)
+
+    def test_early_empty_report_requires_investigation(self):
+        tools = FakeTools()
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+        ])
+        self.assertEqual(run_audit(client, tools, "test-model")["violations"], [])
+        self.assertIn("Inspect repository", client.requests[2]["messages"][-1]["content"])
+
+    def test_real_tools_follow_up_and_report_evidence(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (root / "settings.py").write_text("DEBUG = True\n", encoding="utf-8")
+            tools = RepositoryTools("https://github.com/example/demo")
+            tools.root = root
+            finding = {
+                "rule_id": "CFG-001", "category": "configuration", "severity": "low",
+                "file": "settings.py", "line": 1,
+                "description": "Debug mode is enabled in the default configuration",
+                "evidence": "The default settings file sets DEBUG to True.",
+                "recommendation": "Read the debug setting from an environment variable and default it to False.",
+            }
+            client = FakeClient([
+                response(calls=[tool_call("list_files", {}, "call_1")]),
+                response(calls=[tool_call("search_code", {"pattern": "DEBUG"}, "call_2")]),
+                response(calls=[tool_call("read_file", {"path": "settings.py"}, "call_3")]),
+                response(content=json.dumps({"repository": tools.repository_url,
+                                             "violations": [finding]})),
+            ])
+            with patch.object(tools, "_files", return_value=["README.md", "settings.py"]):
+                report = run_audit(client, tools, "test-model")
+            self.assertEqual(report["violations"], [finding])
+            observations = [json.loads(request["messages"][-1]["content"])
+                            for request in client.requests[1:]]
+            self.assertEqual(observations[1]["matches"], [{"file": "settings.py", "line": 1}])
+            self.assertIn("1: DEBUG = True", observations[2]["content"])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Unattended command-line entry point for my DevOps repository auditor."""
+"""Unattended command-line entry point for the DevOps repository auditor."""
 
 from __future__ import annotations
 

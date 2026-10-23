@@ -63,7 +63,7 @@ def normalize_github_url(url: str) -> str:
 
 
 class RepositoryTools:
-    """I clone into a temporary directory and expose only bounded observations."""
+    """Clone into a temporary directory and expose only bounded observations."""
 
     def __init__(self, repository_url: str):
         self.repository_url = normalize_github_url(repository_url)
@@ -75,15 +75,19 @@ class RepositoryTools:
         self.root = Path(self._temporary.name) / "repository"
         try:
             # No hooks or checked-out code are executed. The target stays unchanged.
+            git_options = ["-c", f"core.hooksPath={os.devnull}"]
+            if os.name == "nt":
+                # Git for Windows can use OpenSSL when Schannel revocation is unavailable.
+                git_options.extend(["-c", "http.sslBackend=openssl"])
             subprocess.run(
-                ["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet",
+                ["git", *git_options, "clone", "--quiet",
                  "--no-checkout", "--", self.repository_url + ".git", str(self.root)],
                 check=True, capture_output=True, text=True, timeout=GIT_TIMEOUT,
                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0",
                      "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull},
             )
             subprocess.run(
-                ["git", "-C", str(self.root), "-c", "core.hooksPath=/dev/null",
+                ["git", "-C", str(self.root), *git_options,
                  "checkout", "--quiet", "--force"],
                 check=True, capture_output=True, text=True, timeout=GIT_TIMEOUT,
                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0",
