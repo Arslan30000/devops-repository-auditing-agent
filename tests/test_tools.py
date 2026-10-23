@@ -3,10 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tools import InspectionError, RepositoryTools, normalize_github_url
+from tools import InspectionError, RepositoryTools, normalize_github_url, _redact
 
 
 class ToolTests(unittest.TestCase):
+    def test_redacts_groq_and_xai_tokens(self):
+        for prefix in ("gsk_", "xai-"):
+            token = prefix + "A" * 40
+            self.assertNotIn(token, _redact(f"Provider returned {token}"))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=Path.cwd())
         self.root = Path(self.temporary.name)

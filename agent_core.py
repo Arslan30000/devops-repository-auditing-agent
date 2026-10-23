@@ -66,6 +66,34 @@ class AgentError(Exception):
     """The agent cannot produce a trustworthy completed inspection."""
 
 
+def _request_error(exc: Exception, client: Any) -> str:
+    """Expose useful provider diagnostics without dumping responses or credentials."""
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    message = body.get("message") if isinstance(body, dict) else None
+    detail = ""
+    if isinstance(message, str):
+        key = getattr(client, "api_key", None)
+        if isinstance(key, str) and key:
+            message = message.replace(key, "[REDACTED API KEY]")
+        detail = " ".join(_redact(message).split())[:600]
+    prefix = "LLM request failed"
+    if type(status) is int:
+        prefix += f" (HTTP {status})"
+    hints = {
+        400: "Check the provider's model, tool-calling, and JSON-mode support.",
+        401: "Check OPENAI_API_KEY and OPENAI_BASE_URL.",
+        403: "Check the account's model permissions and API access.",
+        404: "Check OPENAI_MODEL and OPENAI_BASE_URL.",
+        413: "The request is too large for this provider; use a higher-limit model or plan.",
+        429: "Provider quota or rate limit reached; check token/request limits and retry after the indicated delay.",
+    }
+    hint = hints.get(status, "Check provider availability, network, and request timeout.")
+    return f"{prefix}: {detail}. {hint}" if detail else f"{prefix}. {hint}"
+
+
 def validate_report(raw: Any, repository: str,
                     observed_lines: dict[str, set[int]] | None = None,
                     discovered: bool = True,
@@ -155,7 +183,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str) -> dict:
                 response_format={"type": "json_object"}, timeout=60,
             )
         except Exception as exc:
-            raise AgentError("LLM request failed; check credentials, model access, and network") from exc
+            raise AgentError(_request_error(exc, client)) from exc
         if not response.choices:
             raise AgentError("LLM returned no choices")
         message = response.choices[0].message

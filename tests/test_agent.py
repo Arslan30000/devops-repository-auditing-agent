@@ -48,6 +48,32 @@ class FakeClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_provider_error_preserves_reason_and_redacts_key(self):
+        key = "test-provider-key"
+        error = RuntimeError("Do not print the raw exception")
+        error.status_code = 429
+        error.body = {"error": {"message": f"Token limit reached using {key}; retry in 20s",
+                                "failed_generation": "private repository content"}}
+        client = FakeClient([])
+        client.api_key = key
+        with patch.object(client.chat.completions, "create", side_effect=error):
+            with self.assertRaises(AgentError) as raised:
+                run_audit(client, FakeTools(), "test-model")
+        message = str(raised.exception)
+        self.assertIn("HTTP 429", message)
+        self.assertIn("Token limit reached", message)
+        self.assertIn("retry in 20s", message)
+        self.assertNotIn(key, message)
+        self.assertNotIn("private repository content", message)
+
+    def test_network_error_does_not_dump_raw_exception(self):
+        client = FakeClient([])
+        with patch.object(client.chat.completions, "create", side_effect=RuntimeError("private data")):
+            with self.assertRaises(AgentError) as raised:
+                run_audit(client, FakeTools(), "test-model")
+        self.assertIn("network", str(raised.exception))
+        self.assertNotIn("private data", str(raised.exception))
+
     def test_model_selects_follow_up_tools_and_reports_json(self):
         tools = FakeTools()
         client = FakeClient([
