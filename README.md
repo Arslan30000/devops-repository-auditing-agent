@@ -95,6 +95,16 @@ python -m json.tool report.json
 
 The top-level object contains `repository` and `violations`. Each violation includes `rule_id`, `category`, `severity`, `file`, `line`, `description`, `evidence`, and `recommendation`. Severity is `critical`, `high`, `medium`, or `low`. An empty `violations` array means no supported finding was reported; it is not a guarantee that the repository has no defects. `file` and `line` are JSON `null` when not applicable. See `sample_report.json` for the live result and `examples/offline_sample_report.json` for an example containing a finding.
 
+To diagnose inspection coverage, add an optional trace path:
+
+```bash
+python agent.py --repo https://github.com/owner/repository --output report.json --trace reports/audit-trace.jsonl
+```
+
+The JSONL trace records model phases, request sizes, successful/failed tool names, read-file paths and line counts, validation rejections, and completion counts. It excludes source text, search strings, raw model generations, and API keys. It is flushed during the run so partial progress remains available on failure. The trace and report paths must differ.
+
+Before accepting an empty report, the agent must read file content and inspect at least three distinct discovered source/configuration candidates, or all such candidates when fewer than three exist. Candidate paths are recognized by common source/configuration extensions and filenames; this is a minimum coverage check, not a vulnerability scanner or proof of a complete audit. The LLM still chooses the files, ranges, and follow-up tools. A training repository's intentional insecure examples remain in scope; findings should describe the example's risk without alleging a real production incident.
+
 ## How the agent works
 
 1. `agent.py` validates the required key, opens a temporary clone through `RepositoryTools`, invokes the agent, and saves the validated JSON.

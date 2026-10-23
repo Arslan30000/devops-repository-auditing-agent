@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -51,6 +53,61 @@ class FakeClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_empty_report_requires_source_reads_and_trace_explains_coverage(self):
+        class SourceTools(FakeTools):
+            def list_files(self):
+                self.observed.append("list_files")
+                return {"files": [{"path": path, "bytes": 20} for path in
+                                   ("app.py", "Dockerfile", "service.yml")], "count": 3}
+        tools = SourceTools()
+        empty = response(content=json.dumps({"repository": tools.repository_url, "violations": []}))
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(calls=[tool_call("read_file", {"path": "app.py"}, "call_2")]),
+            empty,
+            response(calls=[tool_call("read_file", {"path": "Dockerfile"}, "call_3")]),
+            response(calls=[tool_call("read_file", {"path": "service.yml"}, "call_4")]),
+            empty,
+        ])
+        events = []
+        report = run_audit(client, tools, "test-model", trace=events.append)
+        self.assertEqual(report["violations"], [])
+        self.assertEqual(len([item for item in tools.observed if isinstance(item, tuple)]), 3)
+        self.assertTrue(any(event["event"] == "candidate_rejected" and
+                            "Insufficient inspection" in event["reason"] for event in events))
+        self.assertEqual(events[-1]["event"], "audit_completed")
+        self.assertEqual(events[-1]["candidate_files_read"], 3)
+
+    def test_cli_writes_metadata_trace_without_source_text(self):
+        from agent import main
+        tools = FakeTools()
+        secret_source = "source-only-sensitive-value"
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "call_1")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
+        ])
+        sdk = SimpleNamespace(OpenAI=lambda **kwargs: client)
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            output = Path(directory) / "report.json"
+            trace = Path(directory) / "trace.jsonl"
+            with patch.dict(sys.modules, {"openai": sdk}), \
+                 patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
+                 patch("agent.RepositoryTools") as factory, \
+                 patch.object(tools, "read_file", return_value={"path": "README.md",
+                                                               "content": "1: " + secret_source}):
+                factory.return_value.__enter__.return_value = tools
+                result = main(["--repo", tools.repository_url, "--output", str(output),
+                               "--trace", str(trace)])
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(output.read_text())["violations"], [])
+            text = trace.read_text()
+            events = [json.loads(line) for line in text.splitlines()]
+            self.assertTrue(any(event.get("path") == "README.md" for event in events))
+            self.assertNotIn(secret_source, text)
+            self.assertNotIn("test-key", text)
+            self.assertEqual(events[-1]["event"], "audit_completed")
+
     def test_provider_tool_parse_failure_is_retried_before_execution(self):
         error = RuntimeError("Do not print raw generation")
         error.status_code = 400

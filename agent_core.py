@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from typing import Any
+from typing import Any, Callable
+from pathlib import PurePosixPath
 
 from tools import InspectionError, RepositoryTools, _redact
 
@@ -45,6 +46,9 @@ dependencies, code quality, tests, CI, security, configuration, collaboration, a
 build/release when relevant. Inspect actual configuration and source before making a claim.
 Read the README and project metadata early to determine whether this is a deployed application,
 reusable library, tutorial, or template, and evaluate practices in that context.
+Educational intent does not make an insecure configuration safe. Inspect executable/configuration
+files in training projects too, and report demonstrable risks as properties of those examples;
+do not claim that the examples prove a production incident or contain real leaked credentials.
 For CI check triggers, test/build gates, permissions, and unsafe PR contexts; for dependencies
 compare the project's package manager and lockfile conventions; for security distinguish
 real credentials from examples and placeholders. Consider acceptable alternatives.
@@ -93,6 +97,22 @@ TOOL_SCHEMAS = [
 
 class AgentError(Exception):
     """The agent cannot produce a trustworthy completed inspection."""
+
+
+class CoverageError(AgentError):
+    """More repository inspection is required before accepting the report."""
+
+
+def _inspection_candidate(path: str) -> bool:
+    """Classify paths for a minimum inspection gate, not for vulnerability findings."""
+    name = PurePosixPath(path).name.lower()
+    return (path.startswith(".github/workflows/") or
+            name in {"dockerfile", "jenkinsfile", "makefile", ".gitignore", "requirements.txt",
+                     "pipfile", "poetry.lock", "uv.lock"} or
+            PurePosixPath(path).suffix.lower() in {
+                ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb",
+                ".php", ".c", ".cpp", ".cs", ".sh", ".ps1", ".tf", ".tfvars",
+                ".yaml", ".yml", ".toml", ".json", ".ini", ".cfg", ".xml", ".gradle"})
 
 
 def _safe_detail(message: str, client: Any) -> str:
@@ -170,16 +190,25 @@ def _recoverable_tool_parse_error(exc: Exception) -> bool:
 def validate_report(raw: Any, repository: str,
                     observed_lines: dict[str, set[int]] | None = None,
                     discovered: bool = True,
-                    inspected: bool = True) -> dict:
+                    inspected: bool = True,
+                    candidate_files: set[str] | None = None) -> dict:
     """Reject malformed or unsupported output instead of silently repairing it."""
     if not isinstance(raw, dict) or set(raw) != {"repository", "violations"}:
         raise AgentError("Report must contain exactly repository and violations")
     if raw["repository"] != repository or not isinstance(raw["violations"], list):
         raise AgentError("Report repository or violations array is invalid")
     if not discovered:
-        raise AgentError("Call list_files before completing the inspection")
+        raise CoverageError("Call list_files before completing the inspection")
     if not inspected:
-        raise AgentError("Inspect repository content or history before completing the inspection")
+        raise CoverageError("Inspect repository file content before completing the inspection")
+    if not raw["violations"] and candidate_files:
+        read = candidate_files.intersection(observed_lines or {})
+        required = min(3, len(candidate_files))
+        if len(read) < required:
+            remaining = sorted(candidate_files - read)[:8]
+            raise CoverageError(f"Insufficient inspection for an empty report: read at least {required} "
+                             f"distinct discovered source/configuration files; read {len(read)}. "
+                             f"Choose relevant files, for example {remaining}")
     seen: set[tuple[str, str | None, int | None]] = set()
     for item in raw["violations"]:
         if not isinstance(item, dict) or set(item) != FIELDS:
@@ -302,9 +331,14 @@ def _final_report_request(request: dict) -> dict:
 
 
 def run_audit(client: Any, tools: RepositoryTools, model: str, *,
-              max_context_chars: int = 20_000, max_completion_tokens: int = 2_048) -> dict:
+              max_context_chars: int = 20_000, max_completion_tokens: int = 2_048,
+              trace: Callable[[dict], None] | None = None) -> dict:
     """Let the model choose tools, execute calls, and feed observations back."""
     repository = tools.repository_url
+    def emit(event: str, **details: Any) -> None:
+        if trace is not None:
+            trace({"event": event, **details})
+    emit("audit_started", repository=repository, model=_safe_detail(model, client))
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Audit {repository}. Start by discovering its files, then investigate relevant evidence. "
@@ -317,6 +351,17 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
     inspected = False
     reporting = False
     observed_lines: dict[str, set[int]] = {}
+    candidate_files: set[str] = set()
+
+    def completed(raw: Any) -> dict:
+        report = validate_report(raw, repository, observed_lines=observed_lines,
+                                 discovered=discovered, inspected=inspected,
+                                 candidate_files=candidate_files)
+        emit("audit_completed", violations=len(report["violations"]), tool_calls=call_count,
+             files_read=len(observed_lines), candidate_files_discovered=len(candidate_files),
+             candidate_files_read=len(candidate_files.intersection(observed_lines)))
+        return report
+
     for _turn in range(MAX_MODEL_TURNS):
         can_call = call_count < MAX_TOOL_CALLS
         if not can_call:
@@ -336,8 +381,12 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
         parse_attempt = 0
         while True:
             bounded = _bounded_request(request, max_context_chars, keep_latest_tools=not reporting)
+            compacted = len(bounded["messages"]) < len(request["messages"])
             if reporting:
                 bounded = _final_report_request(bounded)
+            emit("model_request", turn=_turn + 1, phase="reporting" if reporting else "investigation",
+                 request_chars=_request_size(bounded), tool_calls=call_count,
+                 context_compacted=compacted)
             try:
                 response = client.chat.completions.create(**bounded)
                 break
@@ -347,6 +396,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
                     if smaller < max_context_chars:
                         max_context_chars = smaller
                         size_attempt += 1
+                        emit("context_retry", max_context_chars=max_context_chars)
                         continue
                 if not reporting and _recoverable_tool_parse_error(exc) and parse_attempt < 2:
                     parse_attempt += 1
@@ -356,6 +406,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
                         "arguments matching its schema, with no Markdown, XML, or textual "
                         "function-call imitation. Choose a small, relevant inspection step."}]
                     request["tool_choice"] = "required"
+                    emit("generation_retry", attempt=parse_attempt + 1)
                     continue
                 phase = "reporting" if reporting else "investigation"
                 attempts = f"; generation attempts: {parse_attempt + 1}" if parse_attempt else ""
@@ -378,12 +429,26 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
                 result = _dispatch(tools, call.function.name, call.function.arguments)
                 if "error" not in result and call.function.name == "list_files":
                     discovered = True
-                if "error" not in result and call.function.name in {"read_file", "search_code", "git_log"}:
+                    candidate_files.update(item["path"] for item in result.get("files", [])
+                                           if _inspection_candidate(item["path"]))
+                if "error" not in result and call.function.name == "read_file":
                     inspected = True
                 if "error" not in result and call.function.name == "read_file":
                     path = result["path"]
                     observed_lines.setdefault(path, set()).update(
                         int(line) for line in re.findall(r"(?m)^(\d+):", result["content"]))
+                details = {"tool": _safe_detail(call.function.name, client), "ok": "error" not in result}
+                if "error" in result:
+                    details["error"] = _safe_detail(str(result["error"]), client)
+                elif call.function.name == "read_file":
+                    details.update(path=_safe_detail(result["path"], client),
+                                   lines_returned=len(re.findall(r"(?m)^\d+:", result["content"])),
+                                   start_line=result.get("start_line"), end_line=result.get("end_line"),
+                                   truncated=result.get("truncated"))
+                elif call.function.name == "list_files":
+                    details.update(files_returned=len(result.get("files", [])), total_files=result.get("count"),
+                                   next_offset=result.get("next_offset"))
+                emit("tool_result", **details)
                 messages.append({"role": "tool", "tool_call_id": call.id,
                                  "content": json.dumps(result, ensure_ascii=False, separators=(",", ":"))})
                 call_count += 1
@@ -394,24 +459,29 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
             # A valid model-written report already satisfies the output contract.
             # Avoid an unnecessary API call and replay of the tool conversation.
             try:
-                return validate_report(json.loads(message.content or ""), repository,
-                                       observed_lines=observed_lines, discovered=discovered,
-                                       inspected=inspected)
-            except (ValueError, AgentError):
-                pass
+                return completed(json.loads(message.content or ""))
+            except (ValueError, AgentError) as exc:
+                emit("candidate_rejected", reason=_safe_detail(str(exc), client))
+                draft_issue = _safe_detail(str(exc), client)
+                if isinstance(exc, CoverageError):
+                    messages.append({"role": "assistant", "content": message.content or ""})
+                    messages.append({"role": "user", "content":
+                                     f"Continue investigating before reporting: {draft_issue}. "
+                                     "Use the available tools to read relevant source/configuration files."})
+                    continue
             # Providers such as Groq reject JSON mode together with tool definitions.
             # Preserve the observations, then request the final JSON without tools.
             messages.append({"role": "assistant", "content": message.content or ""})
             messages.append({"role": "user", "content":
+                             f"Address this validation issue: {draft_issue}. "
                              "Using the observed evidence, return the final JSON report now. "
                              "Include exactly repository and violations and no Markdown."})
             reporting = True
             continue
         try:
-            return validate_report(json.loads(message.content or ""), repository,
-                                   observed_lines=observed_lines, discovered=discovered,
-                                   inspected=inspected)
+            return completed(json.loads(message.content or ""))
         except (ValueError, AgentError) as exc:
+            emit("candidate_rejected", reason=_safe_detail(str(exc), client))
             validation_retries += 1
             if validation_retries > 2:
                 reason = _safe_detail(str(exc), client)
