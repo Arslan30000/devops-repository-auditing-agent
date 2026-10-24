@@ -133,7 +133,10 @@ class RepositoryTools:
             path = root / name
             if path.is_file() and not path.is_symlink():
                 size = path.stat().st_size
-                files.append({"path": name, "bytes": size, "readable_size": size <= MAX_FILE_BYTES})
+                entry = {"path": name, "bytes": size}
+                if size > MAX_FILE_BYTES:
+                    entry["readable_size"] = False
+                files.append(entry)
         next_offset = offset + limit if offset + limit < len(tracked) else None
         return {"files": files, "count": len(tracked), "next_offset": next_offset}
 

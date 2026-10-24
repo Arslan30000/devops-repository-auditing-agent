@@ -137,6 +137,50 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn("tools", client.requests[3])
 
 
+    def test_equivalent_default_reads_and_complete_inventory_are_not_reexecuted(self):
+        tools = FakeTools()
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "first")]),
+            response(calls=[tool_call("list_files", {"offset": 0, "limit": 300}, "overlap")]),
+            response(calls=[tool_call("read_file", {"path": "README.md"}, "read")]),
+            response(calls=[tool_call("read_file", {"path": "README.md", "start_line": 1,
+                                                   "end_line": 80}, "same_read")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []}))])
+        run_audit(client, tools, "test-model")
+        self.assertEqual(tools.observed, ["list_files", ("read_file", "README.md", 1, None)])
+        self.assertIn("Identical call already observed", client.requests[2]["messages"][-1]["content"])
+        self.assertIn("Identical call already observed", client.requests[4]["messages"][-1]["content"])
+
+    def test_unavailable_file_feedback_includes_path_and_new_inspection_candidates(self):
+        from tools import InspectionError
+        class SizedTools(FakeTools):
+            def list_files(self):
+                return {"files": [{"path": "oversized.tf", "bytes": 200000, "readable_size": False},
+                                  {"path": "runtime.tf", "bytes": 100},
+                                  {"path": "safe.py", "bytes": 100}], "count": 3}
+            def read_file(self, path, **kwargs):
+                self.observed.append(path)
+                if path == "runtime.tf":
+                    raise InspectionError("Binary files cannot be read as text")
+                return {"path": path, "content": "1: setting = False"}
+        tools = SizedTools()
+        client = FakeClient([
+            response(calls=[tool_call("list_files", {}, "list")]),
+            response(calls=[tool_call("read_file", {"path": "oversized.tf"}, "large")]),
+            response(calls=[tool_call("read_file", {"path": "runtime.tf"}, "binary")]),
+            response(calls=[tool_call("read_file", {"path": "runtime.tf", "start_line": 20}, "again")]),
+            response(calls=[tool_call("read_file", {"path": "safe.py"}, "valid")]),
+            response(content=json.dumps({"repository": tools.repository_url, "violations": []}))])
+        events = []
+        run_audit(client, tools, "test-model", trace=events.append)
+        self.assertEqual(tools.observed, ["runtime.tf", "safe.py"])
+        error_result = json.loads(client.requests[2]["messages"][-1]["content"])
+        self.assertEqual(error_result["path"], "oversized.tf")
+        self.assertIn("safe.py", error_result["unread_candidates"])
+        failures = [event for event in events if event["event"] == "tool_result" and not event["ok"]]
+        self.assertEqual([event["path"] for event in failures],
+                         ["oversized.tf", "runtime.tf", "runtime.tf"])
+
     def test_missing_file_claim_requires_all_inventory_pages(self):
         item = self.finding()
         item.update(file=None, line=None, evidence="No README in the inventory",

@@ -10,7 +10,7 @@ import math
 from typing import Any, Callable
 from pathlib import PurePosixPath
 
-from tools import InspectionError, RepositoryTools, _redact
+from tools import InspectionError, RepositoryTools, _redact, DEFAULT_READ_LINES
 
 
 MAX_TOOL_CALLS = 36
@@ -336,6 +336,25 @@ def _dispatch(tools: RepositoryTools, name: str, arguments: str) -> dict:
         return {"error": "Tool execution failed; no result was observed"}
 
 
+
+def _call_key(name: str, arguments: str) -> str:
+    """Normalize omitted defaults, so equivalent calls share cached observations."""
+    try:
+        args = json.loads(arguments)
+        if isinstance(args, dict):
+            if name == "list_files" and set(args) <= {"offset", "limit"}:
+                args = {"offset": args.get("offset", 0), "limit": args.get("limit", 100)}
+            elif name == "read_file" and "path" in args and set(args) <= {"path", "start_line", "end_line"}:
+                start = args.get("start_line", 1)
+                end = args.get("end_line")
+                if end is None and type(start) is int:
+                    end = start + DEFAULT_READ_LINES - 1
+                args = {"path": args["path"], "start_line": start, "end_line": end}
+        return name + ":" + json.dumps(args, sort_keys=True)
+    except (ValueError, TypeError):
+        return name + ":" + arguments
+
+
 def _request_size(request: dict) -> int:
     return len(json.dumps(request, ensure_ascii=False, separators=(",", ":")))
 
@@ -432,6 +451,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
     read_metadata: dict[str, dict] = {}
     listed_indices: set[int] = set()
     inventory_count = 0
+    unavailable_files: set[str] = set()
     tool_cache: dict[str, dict] = {}
     failed_calls: list[str] = []
     rate_retries = 0
@@ -467,6 +487,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
             progress = {"tool_calls_used": call_count, "tool_calls_remaining": MAX_TOOL_CALLS - call_count,
                         "inventory_complete": discovered and len(listed_indices) >= inventory_count,
                         "files_read_count": len(observed_lines),
+                        "unavailable_files": sorted(unavailable_files)[:3],
                         "read_files": dict(list(read_metadata.items())[-6:]),
                         "unread_candidates": sorted(candidate_files - observed_lines.keys())[:12],
                         "failed_calls": failed_calls[-2:]}
@@ -478,6 +499,8 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
                     progress["unread_candidates"].pop()
                 elif progress["failed_calls"]:
                     progress["failed_calls"].pop(0)
+                elif progress["unavailable_files"]:
+                    progress["unavailable_files"].pop()
                 else:
                     break
             messages[1] = {"role": "user", "content":
@@ -579,24 +602,52 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
                                              "function": {"name": c.function.name,
                                                           "arguments": c.function.arguments}} for c in calls]})
             for call in calls:
+                cache_key = _call_key(call.function.name, call.function.arguments)
                 try:
-                    canonical = json.dumps(json.loads(call.function.arguments), sort_keys=True)
+                    call_args = json.loads(call.function.arguments)
                 except (ValueError, TypeError):
-                    canonical = call.function.arguments
-                cache_key = call.function.name + ":" + canonical
-                if cache_key in tool_cache:
+                    call_args = {}
+                if not isinstance(call_args, dict):
+                    call_args = {}
+                path_arg = call_args.get("path")
+                page_start = call_args.get("offset", 0)
+                page_limit = call_args.get("limit", 100)
+                page_already_listed = (
+                    call.function.name == "list_files" and discovered
+                    and set(call_args) <= {"offset", "limit"}
+                    and type(page_start) is int and page_start >= 0
+                    and type(page_limit) is int and 1 <= page_limit <= 300
+                    and (len(listed_indices) >= inventory_count or
+                         set(range(page_start, min(inventory_count, page_start + page_limit)))
+                         <= listed_indices))
+                if call.function.name == "read_file" and isinstance(path_arg, str) and path_arg in unavailable_files:
+                    result = {"error": "File is unavailable for bounded text inspection; changing line ranges "
+                                       "cannot bypass a size/binary limit. Choose another file.",
+                              "path": path_arg}
+                elif page_already_listed or cache_key in tool_cache:
                     result = {"error": "Identical call already observed. Choose a different file/range/pattern.",
-                              "previous_result": {"ok": "error" not in tool_cache[cache_key]}}
+                              "previous_result": {"ok": page_already_listed or
+                                                   "error" not in tool_cache[cache_key]}}
                 else:
                     result = _dispatch(tools, call.function.name, call.function.arguments)
                     tool_cache[cache_key] = result
                 if "error" in result:
                     failed_calls.append(_safe_detail(cache_key, client))
+                    if call.function.name == "read_file" and isinstance(path_arg, str):
+                        result["path"] = path_arg
+                        if str(result["error"]).startswith(("File exceeds ", "Binary files cannot")):
+                            unavailable_files.add(path_arg)
+                            candidate_files.discard(path_arg)
+                        result["next_step"] = "Read a different eligible file or a valid smaller line range."
+                        result["unread_candidates"] = sorted(
+                            candidate_files - observed_lines.keys() - unavailable_files)[:6]
 
                 if "error" not in result and call.function.name == "list_files":
                     discovered = True
                     page_args = json.loads(call.function.arguments)
                     inventory_count = result.get("count", 0)
+                    unavailable_files.update(item["path"] for item in result.get("files", [])
+                                             if not item.get("readable_size", True))
                     start = page_args.get("offset", 0)
                     listed_indices.update(range(start, min(inventory_count,
                                               start + page_args.get("limit", 100))))
@@ -618,6 +669,8 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
                 details = {"tool": _safe_detail(call.function.name, client), "ok": "error" not in result}
                 if "error" in result:
                     details["error"] = _safe_detail(str(result["error"]), client)
+                    if call.function.name == "read_file" and isinstance(path_arg, str):
+                        details["path"] = _safe_detail(path_arg, client)
                 elif call.function.name == "read_file":
                     details.update(path=_safe_detail(result["path"], client),
                                    lines_returned=len(re.findall(r"(?m)^\d+:", result["content"])),
