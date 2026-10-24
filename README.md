@@ -156,7 +156,7 @@ This writes `examples/offline_sample_report.json` through the actual agent/repor
 
 ## Evidence validation and review
 
-For file-specific findings, evidence must quote exact numbered source lines returned by `read_file` and include the cited line. Python rejects invented snippets, comment-only configuration evidence, and empty resource-block evidence, then asks the model to investigate further. Nonempty drafts receive a separate model review of source evidence, context, defaults, severity, and recommendations. Reviewed output is validated again. These checks establish source provenance; they cannot prove that every interpretation is correct.
+Repository-level absence claims require the complete paginated file inventory. For file-specific findings, evidence must quote exact numbered source lines returned by `read_file` and include the cited line. Python rejects invented snippets, comment-only configuration evidence, and empty resource-block evidence, then asks the model to investigate further. Nonempty drafts receive a separate model review of source evidence, context, defaults, severity, and recommendations. Reviewed output is validated again. These checks establish source provenance; they cannot prove that every interpretation is correct.
 
 GitHub Actions runs the offline suite and example generator on Python 3.10 and 3.12 for pushes and pull requests, with read-only permissions and no API credentials. Regression tests cover fabricated/comment-only evidence, draft review, duplicate calls, temporary rate-limit recovery, bounded retries, and CLI failures preserving existing reports.
 

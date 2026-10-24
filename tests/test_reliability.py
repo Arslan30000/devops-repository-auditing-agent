@@ -137,6 +137,14 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn("tools", client.requests[3])
 
 
+    def test_missing_file_claim_requires_all_inventory_pages(self):
+        item = self.finding()
+        item.update(file=None, line=None, evidence="No README in the inventory",
+                    description="Missing project documentation")
+        with self.assertRaisesRegex(AgentError, "complete list_files inventory"):
+            validate_report({"repository": FakeTools.repository_url, "violations": [item]},
+                            FakeTools.repository_url, inventory_complete=False)
+
     def test_small_context_preserves_latest_source_and_bounded_progress(self):
         class ManyFiles(FakeTools):
             def list_files(self):

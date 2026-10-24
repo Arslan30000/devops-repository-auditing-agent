@@ -257,7 +257,8 @@ def validate_report(raw: Any, repository: str,
                     discovered: bool = True,
                     inspected: bool = True,
                     candidate_files: set[str] | None = None,
-                    observed_source: dict[str, dict[int, str]] | None = None) -> dict:
+                    observed_source: dict[str, dict[int, str]] | None = None,
+                    inventory_complete: bool = True) -> dict:
     """Reject malformed or unsupported output instead of silently repairing it."""
     if not isinstance(raw, dict) or set(raw) != {"repository", "violations"}:
         raise AgentError("Report must contain exactly repository and violations")
@@ -300,6 +301,9 @@ def validate_report(raw: Any, repository: str,
                 raise AgentError(f"Read {item['file']} before citing it")
             if item["line"] is not None and item["line"] not in observed_lines[item["file"]]:
                 raise AgentError(f"Read line {item['line']} of {item['file']} before citing it")
+        if item["file"] is None and not inventory_complete:
+            raise CoverageError("Repository-level absence requires the complete list_files inventory; "
+                                "follow next_offset before reporting missing files")
         if observed_source is not None:
             _validate_evidence(item, observed_source)
         identity = (item["rule_id"], item["file"], item["line"])
@@ -426,6 +430,8 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
     candidate_files: set[str] = set()
     observed_source: dict[str, dict[int, str]] = {}
     read_metadata: dict[str, dict] = {}
+    listed_indices: set[int] = set()
+    inventory_count = 0
     tool_cache: dict[str, dict] = {}
     failed_calls: list[str] = []
     rate_retries = 0
@@ -435,7 +441,8 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
         nonlocal review_started
         report = validate_report(raw, repository, observed_lines=observed_lines,
                                  discovered=discovered, inspected=inspected,
-                                 candidate_files=candidate_files, observed_source=observed_source)
+                                 candidate_files=candidate_files, observed_source=observed_source,
+                                 inventory_complete=discovered and len(listed_indices) >= inventory_count)
         if report["violations"] and not review_started:
             review_started = True
             raise ReviewRequired(
@@ -458,6 +465,7 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
             reporting = True
         if call_count:
             progress = {"tool_calls_used": call_count, "tool_calls_remaining": MAX_TOOL_CALLS - call_count,
+                        "inventory_complete": discovered and len(listed_indices) >= inventory_count,
                         "files_read_count": len(observed_lines),
                         "read_files": dict(list(read_metadata.items())[-6:]),
                         "unread_candidates": sorted(candidate_files - observed_lines.keys())[:12],
@@ -587,6 +595,11 @@ def run_audit(client: Any, tools: RepositoryTools, model: str, *,
 
                 if "error" not in result and call.function.name == "list_files":
                     discovered = True
+                    page_args = json.loads(call.function.arguments)
+                    inventory_count = result.get("count", 0)
+                    start = page_args.get("offset", 0)
+                    listed_indices.update(range(start, min(inventory_count,
+                                              start + page_args.get("limit", 100))))
                     candidate_files.update(item["path"] for item in result.get("files", [])
                                            if _inspection_candidate(item["path"])
                                            and item.get("readable_size", True))
