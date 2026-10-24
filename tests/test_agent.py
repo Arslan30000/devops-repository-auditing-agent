@@ -179,13 +179,13 @@ class AgentTests(unittest.TestCase):
         client = FakeClient([
             response(calls=[tool_call("list_files", {}, "call_1")]),
             response(calls=[tool_call("read_file", {"path": "README.md"}, "call_2")]),
-            response(calls=[tool_call("read_file", {"path": "README.md"}, "call_3")]),
+            response(calls=[tool_call("read_file", {"path": "README.md", "start_line": 2}, "call_3")]),
             error,
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
             response(content=json.dumps({"repository": tools.repository_url, "violations": []})),
         ])
-        def large_read(path):
-            return {"path": path, "content": "1: " + "evidence " * 450}
+        def large_read(path, **kwargs):
+            return {"path": path, "content": str(kwargs.get("start_line", 1)) + ": " + "evidence " * 450}
         with patch.object(tools, "read_file", side_effect=large_read):
             report = run_audit(client, tools, "test-model")
         self.assertEqual(report["violations"], [])
@@ -317,7 +317,7 @@ class AgentTests(unittest.TestCase):
         tools = FakeTools()
         item = {"rule_id": "CFG-001", "category": "configuration", "severity": "medium",
                 "file": "README.md", "line": 12, "description": "Machine-specific path",
-                "evidence": "A local path is embedded at line 12", "recommendation": "Use a relative path"}
+                "evidence": "12: # Example", "recommendation": "Use a relative path"}
         proposed = json.dumps({"repository": tools.repository_url, "violations": [item]})
         client = FakeClient([
             response(calls=[tool_call("list_files", {}, "call_1")]),
@@ -376,7 +376,7 @@ class AgentTests(unittest.TestCase):
                 "rule_id": "CFG-001", "category": "configuration", "severity": "low",
                 "file": "settings.py", "line": 1,
                 "description": "Debug mode is enabled in the default configuration",
-                "evidence": "The default settings file sets DEBUG to True.",
+                "evidence": "1: DEBUG = True",
                 "recommendation": "Read the debug setting from an environment variable and default it to False.",
             }
             client = FakeClient([

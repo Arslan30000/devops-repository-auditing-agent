@@ -5,3 +5,7 @@ __pycache__/
 *.py[cod]
 report.json
 
+.env.*
+!.env.example
+/reports/
+.audit-*.json

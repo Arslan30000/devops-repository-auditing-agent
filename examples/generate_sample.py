@@ -37,7 +37,7 @@ class ScriptedClient:
                 "rule_id": "CFG-001", "category": "configuration", "severity": "low",
                 "file": "settings.py", "line": 1,
                 "description": "Debug mode is enabled in the default configuration",
-                "evidence": "The default settings file sets DEBUG to True.",
+                "evidence": "1: DEBUG = True",
                 "recommendation": "Read the debug setting from an environment variable and default it to False.",
             }]}), []),
         ]

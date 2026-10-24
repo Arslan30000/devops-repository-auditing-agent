@@ -40,20 +40,27 @@ def main(argv: list[str] | None = None) -> int:
 
         context_limit = _environment_limit("AUDIT_MAX_CONTEXT_CHARS", 20_000, 8_000, 500_000)
         output_limit = _environment_limit("AUDIT_MAX_COMPLETION_TOKENS", 2_048, 256, 32_768)
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], max_retries=2)
+        rate_wait = _environment_limit("AUDIT_MAX_RATE_WAIT_SECONDS", 120, 0, 600)
+        rate_retries = _environment_limit("AUDIT_MAX_RATE_RETRIES", 5, 0, 10)
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], max_retries=0)
         if args.trace:
             trace_path = Path(args.trace)
             if trace_path.resolve() == Path(args.output).resolve():
                 raise AgentError("Trace and report paths must differ")
             trace_path.parent.mkdir(parents=True, exist_ok=True)
             trace_stream = trace_path.open("w", encoding="utf-8")
-            def trace_callback(event: dict) -> None:
+        def trace_callback(event: dict) -> None:
+            if event["event"] == "rate_limit_wait":
+                print(f"Rate limited; waiting {event['seconds']} seconds "
+                      f"(retry {event['retry']}/{rate_retries})", file=sys.stderr, flush=True)
+            if trace_stream is not None:
                 trace_stream.write(json.dumps(event, ensure_ascii=False) + "\n")
                 trace_stream.flush()
         with RepositoryTools(args.repo) as tools:
             report = run_audit(client, tools, os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
                                max_context_chars=context_limit, max_completion_tokens=output_limit,
-                               trace=trace_callback)
+                               trace=trace_callback, max_rate_wait_seconds=rate_wait,
+                               max_rate_retries=rate_retries)
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         # An incomplete or invalid report never replaces an existing result.
@@ -64,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
             stream.write("\n")
         temporary.replace(output)
         return 0
+    except KeyboardInterrupt:
+        print("Audit interrupted; no completed report was written", file=sys.stderr)
+        return 130
     except (InspectionError, AgentError, OSError, ImportError) as exc:
         if trace_stream is not None:
             try:

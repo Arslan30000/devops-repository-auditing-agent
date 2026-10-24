@@ -132,7 +132,8 @@ class RepositoryTools:
         for name in tracked[offset:offset + limit]:
             path = root / name
             if path.is_file() and not path.is_symlink():
-                files.append({"path": name, "bytes": path.stat().st_size})
+                size = path.stat().st_size
+                files.append({"path": name, "bytes": size, "readable_size": size <= MAX_FILE_BYTES})
         next_offset = offset + limit if offset + limit < len(tracked) else None
         return {"files": files, "count": len(tracked), "next_offset": next_offset}
 
@@ -164,6 +165,8 @@ class RepositoryTools:
                 break
             output.append(numbered)
             used += len(numbered) + 1
+        if not output and start_line <= len(lines):
+            raise InspectionError("A source line exceeds the output budget; inspect another file")
         actual_end = start_line + len(output) - 1
         return {"path": path, "content": "\n".join(output), "start_line": start_line,
                 "end_line": actual_end, "total_lines": len(lines),
